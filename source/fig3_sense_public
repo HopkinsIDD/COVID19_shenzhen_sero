@@ -1,0 +1,634 @@
+---
+title: "fig3"
+author: "Qifang Bi"
+date: "8/15/2020"
+output: pdf_document
+---
+
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE, message=FALSE, warning=FALSE)
+knitr::opts_knit$set(root.dir = here::here())
+```
+
+```{r library}
+
+## Stan settings
+n_iter <- 1500
+n_warmup <- 250
+p_adapt_delta <- 0.99
+n_max_treedepth <- 20
+T_max_sym <- 16 # fit the models to 16 days from sym onset 
+T_max_exp <- 16 # fit the models to 16 days from last day of exposure
+T_max0 <- 16
+# load utility code
+source("source/utils.R")
+# load data from all infected individuals, either PCR confirmed (75) or sero+ (40)
+PCR_case_data <- read.csv("data/PCR_case_data.csv")
+```
+## input to stan model
+```{r prep-data}
+## prep data for sensitivity by time since onset analysis
+# this helps identify the first positive results from the pcr confirmed cases 
+PCR_case_data %>% filter(serosurvey == "no") %>%
+  drop_na(PCR_date) %>%
+  group_by(PA_index) %>%
+  summarise(firstpos = min(which(PCR_result ==1))) -> tmp_first_pos
+
+# the last positive among the PCR confirmed cases
+PCR_case_data %>% filter(serosurvey == "no") %>%
+  drop_na(PCR_date) %>%
+  group_by(PA_index) %>%
+  summarise(lastpos = max(which(PCR_result ==1))) -> tmp_last_pos
+
+## For the main analysis, sensitivity by time from ssymptom onset 
+## get data from all infected individuals, either PCR+ or sero+
+# du helps identify tests from the same person, done on the same date, and show the same results.
+du <-  duplicated(PCR_case_data[c("PCR_result","PA_index","PCR_date")]) 
+
+all_infected <- PCR_case_data %>% 
+  left_join(tmp_last_pos, by="PA_index") %>%
+  mutate(du=du) %>% mutate(nn=row_number())%>%
+  filter(test_id <= lastpos, du==FALSE, serosurvey == "no") %>% 
+  bind_rows(
+    PCR_case_data %>% mutate(du=du) %>% 
+      filter(du==FALSE) %>% 
+      filter(serosurvey == "yes" & Igr == 1) %>%
+      filter(quarantine_enddate >= PCR_date)
+  ) %>%
+  drop_na(PCR_date)
+
+## and turn it into the format that shows #PCR tests, #PCR positive tests on each day from sympton onset
+all_infected %>%
+  filter(!is.na(onset_date)) %>%
+  group_by(t_sym) %>%
+  tally() %>%
+  rename(n_adj = n) %>%
+  left_join(
+    all_infected %>%
+      filter(!is.na(onset_date)) %>%
+      group_by(t_sym, PCR_result) %>%
+      tally() %>%
+      filter(PCR_result == 1) %>%
+      rename(test_pos_adj = n) %>%
+      dplyr::select(-PCR_result),
+    by = "t_sym"
+  ) %>%
+  replace_na(list(test_pos_adj = 0)) %>%
+  mutate(day=t_sym - min(t_sym) + 1) -> pcr_dat
+
+# create orthogonal polynomials for days since onset for df 3,4,5
+day_poly <- poly(pcr_dat$day, degree=3)   
+day_poly_d4 <- poly(pcr_dat$day, degree=4)
+day_poly_d5 <- poly(pcr_dat$day, degree=5)
+poly_predict <- predict(day_poly, 1:(T_max_sym))
+poly_predict_d4 <- predict(day_poly_d4, 1:(T_max_sym))
+poly_predict_d5 <- predict(day_poly_d5, 1:(T_max_sym))
+
+
+
+## Main analysis, sensitivity by time from last day of exposure to an index
+## get data from all infected individuals, either PCR+ or sero+
+all_infected %>%
+  filter(!is.na(t_exp)) %>%
+  group_by(t_exp) %>%
+  tally() %>%
+  rename(n_adj = n) %>%
+  left_join(
+    all_infected %>%
+      filter(!is.na(t_exp)) %>%
+      mutate(t_exp = ifelse(t_exp>=0, t_exp, 0)) %>%
+      group_by(t_exp, PCR_result) %>%
+      tally() %>% 
+      filter(PCR_result == 1) %>%
+      rename(test_pos_adj = n) %>%
+      dplyr::select(-PCR_result),
+    by = "t_exp"
+  ) %>%
+  replace_na(list(test_pos_adj = 0)) %>%
+  mutate(day=t_exp - min(t_exp) + 1) -> pcr_dat_exp
+
+# create orthogonal polynomials for days since last exposure
+day_poly_exp <- poly(pcr_dat_exp$day, degree=3)   # day has to be over -5
+day_poly_exp_d4 <- poly(pcr_dat_exp$day, degree=4)   # day has to be over -5
+day_poly_exp_d5 <- poly(pcr_dat_exp$day, degree=5)   # day has to be over -5
+poly_predict_exp <- predict(day_poly_exp, 1:(T_max_exp))
+poly_predict_exp_d4 <- predict(day_poly_exp_d4, 1:(T_max_exp))
+poly_predict_exp_d5 <- predict(day_poly_exp_d5, 1:(T_max_exp))
+
+
+
+
+
+## For snsitivity analysis looking at hetereogeneity by study pulled in Kucirka et al.,
+# Combine data from Kucirka et al, and shenzhen data
+all_infected %>% filter(!is.na(t_sym)) %>% 
+  group_by(t_sym) %>% tally() %>% 
+  left_join(
+    all_infected %>% filter(PCR_result==1) %>% 
+      group_by(t_sym) %>% tally() %>% 
+      rename(test_pos= n), by = "t_sym"
+  ) %>% 
+  replace_na(list(test_pos = 0)) %>% 
+  rename(day = t_sym) %>%
+  mutate(study = "Bi", test = "RT_PCR", nqp=0, pcr_pos=test_pos/n) -> raw_data_Bi
+
+# all_infected_up2firstpos %>% filter(!is.na(t_sym)) %>% 
+#   group_by(t_sym) %>% tally() %>% 
+#   left_join(
+#     all_infected_up2firstpos %>% filter(PCR_result==1) %>% 
+#       group_by(t_sym) %>% tally() %>% 
+#       rename(test_pos= n), by = "t_sym"
+#   ) %>%
+#   replace_na(list(test_pos = 0)) %>% 
+#   rename(day = t_sym) %>%
+#   mutate(study = "Bi", test = "RT_PCR", nqp=0, pcr_pos=test_pos/n) -> raw_data_Bi_sens
+
+raw_data <- read_csv("./data/rawdata_addShenzhen.csv") %>% 
+    filter(grepl("RT_PCR", test),
+           study != "Danis_no_4"#, study != "Bi"
+    ) %>% bind_rows(
+      raw_data_Bi
+    )
+
+# raw_data_sens <- read_csv("./data/rawdata_addShenzhen.csv") %>% 
+#     filter(grepl("RT_PCR", test),
+#            study != "Danis_no_4"#, study != "Bi"
+#     ) %>% bind_rows(
+#       raw_data_Bi_sens
+#     )
+
+pcr_dat0 <- raw_data %>%
+    ## add non-quantified positives to other positives for Danis et al.
+    mutate(n_adj=n+nqp,
+           test_pos_adj=test_pos+nqp) %>%
+    ## remove estimates without observations
+    filter(n_adj > 0,
+           ## days needs to be above -5
+           #day > -5,
+           ## only use the nasal swabs from Kujawski, not throat swabs
+           !(study == "Kujawski" & test == "RT_PCR_oro")) %>%
+    mutate(study_idx=paste(study, test, sep="_") %>% as.factor() %>% as.numeric(),
+           pct_pos=test_pos_adj/n_adj) %>%
+  mutate(day = day - min(day) + 1)
+
+day_poly0 <- poly(pcr_dat0$day, degree=3)
+day_poly0_d4 <- poly(pcr_dat0$day, degree=4)
+day_poly0_d5 <- poly(pcr_dat0$day, degree=5)
+poly_predict0 <- predict(day_poly0, 1:T_max0)
+poly_predict0_d4 <- predict(day_poly0_d4, 1:T_max0)
+poly_predict0_d5 <- predict(day_poly0_d5, 1:T_max0)
+
+
+
+
+## For sensitivity analysis, get data from all seropositive individuals
+## PLUS data up to 1st pcr pos test from the PCR confirmed cases
+all_infected_up2firstpos <- PCR_case_data %>% 
+  left_join(tmp_first_pos, by="PA_index") %>% 
+  mutate(du=du) %>% mutate(nn=row_number())%>%
+  filter(test_id <= firstpos, du==FALSE, serosurvey == "no") %>%
+  bind_rows(
+    PCR_case_data %>% mutate(du=du) %>% filter(du==FALSE) %>% 
+      filter(serosurvey == "yes" & Igr == 1) %>%
+      filter(quarantine_enddate >= PCR_date)
+  ) %>%
+  drop_na(PCR_date)
+
+## sensitivity analysis deleting the test results after the first pos from PCR-confirmed cases
+all_infected_up2firstpos %>%
+  filter(!is.na(onset_date)) %>%
+  group_by(t_sym) %>%
+  tally() %>%
+  rename(n_adj = n) %>%
+  left_join(
+    all_infected_up2firstpos %>%
+      filter(!is.na(onset_date)) %>%
+      group_by(t_sym, PCR_result) %>%
+      tally() %>%
+      filter(PCR_result == 1) %>%
+      rename(test_pos_adj = n) %>%
+      dplyr::select(-PCR_result),
+    by = "t_sym"
+  ) %>%
+  replace_na(list(test_pos_adj = 0)) %>%
+  mutate(day=t_sym - min(t_sym) + 1) -> pcr_dat_sym_sens
+
+# create orthogonal polynomials for days since onset
+day_poly_sym_sens <- poly(pcr_dat_sym_sens$day, degree=3)   
+day_poly_d4_sym_sens <- poly(pcr_dat_sym_sens$day, degree=4)
+day_poly_d5_sym_sens <- poly(pcr_dat_sym_sens$day, degree=5) 
+poly_predict_sym_sens <- predict(day_poly_sym_sens, 1:(T_max_sym))
+poly_predict_d4_sym_sens <- predict(day_poly_d4_sym_sens, 1:(T_max_sym))
+poly_predict_d5_sym_sens <- predict(day_poly_d5_sym_sens, 1:(T_max_sym))
+
+```
+## load stan models
+```{r stan-model, cache=T, include=F}
+## simplified the models above
+## did not calculate NPV and etc
+npv_onset_model <- stan_model("source/npv-fixed-onset.stan")
+npv_onset_model_d4 <- stan_model("source/npv-fixed-onset-d4.stan")
+npv_onset_model_d5 <- stan_model("source/npv-fixed-onset-d5.stan")
+```
+## code that runs stan model with shenzhen data
+```{r npv-fixed-onset, cache=F, eval=F, include=F}
+## run main analysis, PCR test sensitivity vs. time from onset
+## the one with best model fit shown in fib 3a, dots with CI
+## model performance shown in 2nd column in appendix table 3
+## 3rd degree polynomial
+main_analysis <- make_analysis_data(stan_model=npv_onset_model,
+                                    dat=pcr_dat,
+                                    T_max=T_max_sym,
+                                    poly_est=as.matrix(day_poly),
+                                    poly_pred=poly_predict,
+                                    iter=n_iter,
+                                    warmup=n_warmup,
+                                    control=list(adapt_delta=p_adapt_delta,
+                                                 max_treedepth=n_max_treedepth),
+                                    save_warmup=F,
+                                    save_stan=T)
+#save(main_analysis, file="generated_data/main_analysis.Rdata")
+
+## 4th degree polynomial
+main_analysis_d4 <- make_analysis_data(stan_model=npv_onset_model_d4,
+                                    dat=pcr_dat,
+                                    T_max=T_max_sym,
+                                    poly_est=as.matrix(day_poly_d4),
+                                    poly_pred=poly_predict_d4,
+                                    iter=n_iter,
+                                    warmup=n_warmup,
+                                    control=list(adapt_delta=p_adapt_delta,
+                                                 max_treedepth=n_max_treedepth),
+                                    save_warmup=F,
+                                    save_stan=T)
+#save(main_analysis_d4, file="generated_data/main_analysis_d4.Rdata")
+
+## 5th degree polynomial
+main_analysis_d5 <- make_analysis_data(stan_model=npv_onset_model_d5,
+                                    dat=pcr_dat,
+                                    T_max=T_max_sym,
+                                    poly_est=as.matrix(day_poly_d5),
+                                    poly_pred=poly_predict_d5,
+                                    iter=n_iter,
+                                    warmup=n_warmup,
+                                    control=list(adapt_delta=p_adapt_delta,
+                                                 max_treedepth=n_max_treedepth),
+                                    save_warmup=F,
+                                    save_stan=T)
+#save(main_analysis_d5, file="generated_data/main_analysis_d5.Rdata")
+
+
+## main analysis, PCR test sensitivity vs. time from last exposure
+## the one with best model fit shown in fib 3b, dots with CI
+## model performance shown in 3rd column in appendix table 3
+## 3rd degree polynomial
+main_analysis_exp <- make_analysis_data(stan_model=npv_onset_model,
+                                    dat=pcr_dat_exp,
+                                    T_max=T_max_exp,
+                                    poly_est=as.matrix(day_poly_exp),
+                                    poly_pred=poly_predict_exp,
+                                    iter=n_iter,
+                                    warmup=n_warmup,
+                                    control=list(adapt_delta=p_adapt_delta,
+                                                 max_treedepth=n_max_treedepth),
+                                    save_warmup=F,
+                                    save_stan=T)
+#save(main_analysis_exp, file="generated_data/main_analysis_exp.Rdata")
+
+## 4th degree polynomial
+main_analysis_exp_d4 <- make_analysis_data(stan_model=npv_onset_model_d4,
+                                    dat=pcr_dat_exp,
+                                    T_max=T_max_exp,
+                                    poly_est=as.matrix(day_poly_exp_d4),
+                                    poly_pred=poly_predict_exp_d4,
+                                    iter=n_iter,
+                                    warmup=n_warmup,
+                                    control=list(adapt_delta=p_adapt_delta,
+                                                 max_treedepth=n_max_treedepth),
+                                    save_warmup=F,
+                                    save_stan=T)
+#save(main_analysis_exp_d4, file="generated_data/main_analysis_exp_d4.Rdata")
+
+## 5th degree polynomial
+main_analysis_exp_d5 <- make_analysis_data(stan_model=npv_onset_model_d5,
+                                    dat=pcr_dat_exp,
+                                    T_max=T_max_exp,
+                                    poly_est=as.matrix(day_poly_exp_d5),
+                                    poly_pred=poly_predict_exp_d5,
+                                    iter=n_iter,
+                                    warmup=n_warmup,
+                                    control=list(adapt_delta=p_adapt_delta,
+                                                 max_treedepth=n_max_treedepth),
+                                    save_warmup=F,
+                                    save_stan=T)
+#save(main_analysis_exp_d5, file="generated_data/main_analysis_exp_d5.Rdata")
+
+
+
+## run sensitivity analysis, PCR test sensitivity vs. time from onset
+## model performance shown in 4th column in appendix table 3
+## we truncate data from PCR-confirmed cases up to their first positive result
+main_analysis_sym_sens <- make_analysis_data(stan_model=npv_onset_model,
+                                    dat=pcr_dat_sym_sens,
+                                    T_max=T_max_sym,
+                                    poly_est=as.matrix(day_poly_sym_sens),
+                                    poly_pred=poly_predict_sym_sens,
+                                    iter=n_iter,
+                                    warmup=n_warmup,
+                                    control=list(adapt_delta=p_adapt_delta,
+                                                 max_treedepth=n_max_treedepth),
+                                    save_warmup=F,
+                                    save_stan=T)
+#save(main_analysis_sym_sens, file="generated_data/main_analysis_sym_sens.Rdata")
+
+## 4th degree polynomial
+main_analysis_d4_sym_sens <- make_analysis_data(stan_model=npv_onset_model_d4,
+                                    dat=pcr_dat_sym_sens,
+                                    T_max=T_max_sym,
+                                    poly_est=as.matrix(day_poly_d4_sym_sens),
+                                    poly_pred=poly_predict_d4_sym_sens,
+                                    iter=n_iter,
+                                    warmup=n_warmup,
+                                    control=list(adapt_delta=p_adapt_delta,
+                                                 max_treedepth=n_max_treedepth),
+                                    save_warmup=F,
+                                    save_stan=T)
+#save(main_analysis_d4_sym_sens, file="generated_data/main_analysis_d4_sym_sens.Rdata")
+
+## 5th degree polynomial
+main_analysis_d5_sym_sens <- make_analysis_data(stan_model=npv_onset_model_d5,
+                                    dat=pcr_dat_sym_sens,
+                                    T_max=T_max_sym,
+                                    poly_est=as.matrix(day_poly_d5_sym_sens),
+                                    poly_pred=poly_predict_d5_sym_sens,
+                                    iter=n_iter,
+                                    warmup=n_warmup,
+                                    control=list(adapt_delta=p_adapt_delta,
+                                                 max_treedepth=n_max_treedepth),
+                                    save_warmup=F,
+                                    save_stan=T)
+#save(main_analysis_d5_sym_sens, file="generated_data/main_analysis_d5_sym_sens.Rdata")
+
+```
+
+## load pregenerated stan outputs
+```{r include=F}
+load("generated_data/main_analysis.Rdata")
+load("generated_data/main_analysis_d4.Rdata")
+load("generated_data/main_analysis_d5.Rdata")
+load("generated_data/main_analysis_exp.Rdata")
+load("generated_data/main_analysis_exp_d4.Rdata")
+load("generated_data/main_analysis_exp_d5.Rdata")
+load("generated_data/main_analysis_sym_sens.Rdata")
+load("generated_data/main_analysis_d4_sym_sens.Rdata")
+load("generated_data/main_analysis_d5_sym_sens.Rdata")
+```
+## gam model
+```{r include=F}
+## time since onset, shenzhen data only
+dat_gam <- all_infected %>% dplyr::select(PCR_result, t_sym) %>% filter(t_sym<=7)
+m1 <- gam(PCR_result ~ s(t_sym, bs="tp"), family=binomial(link="logit"), data = dat_gam)
+sens = predict(m1, data.frame(t_sym=-8:14), type="response", se.fit=TRUE)
+
+dat_gam_figure <-  data.frame(t = -8:14, fnr = 1 - sens$fit)
+
+
+## time since onset, combined data, no random effect
+## combine shenzhen data and data from Kucirka et al.
+## dotted curve appendix fig 3
+raw_data %>% group_by(day) %>% 
+  summarise(n = sum(n), test_pos = sum(test_pos)) %>% 
+  mutate(test_neg = n - test_pos) -> tmp
+
+# turn aggregated data to linelist
+tmp[rep(1:nrow(tmp), tmp$test_pos),c("day")] %>% 
+  mutate(pcr_result = 1) %>%
+  bind_rows(tmp[rep(1:nrow(tmp), tmp$test_neg),c("day")] %>% 
+              mutate(pcr_result = 0)) %>% filter(day<=7) -> tmp0
+
+m1_combined <- gam(pcr_result ~ s(day, bs="tp"),
+                   family=binomial(link="logit"), data = tmp0)
+sens_combined = predict(m1_combined, data.frame(day=-8:14),
+                        type="response", se.fit=TRUE)
+
+dat_gam_combined_figure <- data.frame(t = -8:14, fnr_combined = 1 - sens_combined$fit)
+
+## time since onset, combined data, RANDOM EFFECT by study
+## marginal estimate: dashed curve fig 3a and appendix fig 3a
+## study level prediction: solid curve appendix fig 3
+raw_data %>% group_by(day,study) %>% 
+  summarise(n = sum(n), test_pos = sum(test_pos)) %>% 
+  mutate(test_neg = n - test_pos) -> tmp_re
+
+# turn aggregated data to linelist
+tmp_re[rep(1:nrow(tmp_re), tmp_re$test_pos),c("day","study")] %>% 
+  mutate(pcr_result = 1) %>%
+  bind_rows(tmp_re[rep(1:nrow(tmp_re), tmp_re$test_neg),c("day","study")] %>%
+              mutate(pcr_result = 0)) %>% 
+  filter(day<=7) %>%
+  mutate(study = as.factor(study)) -> tmp0_re
+
+m1_combined_re <- gam(pcr_result ~ s(day) + s(study, bs="re"),
+                      family=binomial(link="logit"), data = tmp0_re)
+
+# prediction by study
+sens_combined_re = predict(m1_combined_re, 
+                           expand.grid(day=-8:14,
+                                       study=unique(tmp_re$study)),
+                           type="response", se.fit=TRUE)
+dat_gam_combined_figure_re <- data.frame(t = -8:14, fnr_combined = 1 - sens_combined_re$fit)
+
+# marginal
+sens_combined_ma = predict(m1_combined_re, 
+                           exclude= "s(study)",
+                           expand.grid(day=-8:14,
+                                       study=unique(tmp_re$study)),
+                           type="response", se.fit=TRUE)
+dat_gam_combined_figure_ma <- data.frame(t = -8:14, fnr_combined = 1 - sens_combined_ma$fit)
+
+
+## time since last exposure, shenzhen data only
+## solid curve fig 3b
+dat_gam_exp <- all_infected %>% filter(!is.na(t_exp)) %>% 
+  dplyr::select(PCR_result, t_exp)%>% filter(t_exp<=14)
+m1_exp <- gam(PCR_result ~ s(t_exp, bs="tp"), 
+              family = binomial(link="logit"), 
+              data=dat_gam_exp )
+sens_exp = predict(m1_exp, data.frame(t_exp=-1:14), 
+                   type="response", se.fit=TRUE)
+
+dat_gam_exp_figure <-  data.frame(t = -1:14, fnr = 1-sens_exp$fit)
+```
+
+## model comparison, results shown in appendix table 3
+```{r include=F}
+"shenzhen data only...by time since onset"
+waic(extract_log_lik(main_analysis$stan_sample))$estimates[3,1]
+waic(extract_log_lik(main_analysis_d4$stan_sample))$estimates[3,1]
+waic(extract_log_lik(main_analysis_d5$stan_sample))$estimates[3,1]
+
+"shenzhen data only...by time since exposure"
+waic(extract_log_lik(main_analysis_exp$stan_sample))$estimates[3,1]
+waic(extract_log_lik(main_analysis_exp_d4$stan_sample))$estimates[3,1]
+waic(extract_log_lik(main_analysis_exp_d5$stan_sample))$estimates[3,1]
+
+"shenzhen data only...by time since onset..up to first pos for the pcr-confirmed case"
+waic(extract_log_lik(main_analysis_sym_sens$stan_sample))$estimates[3,1]
+waic(extract_log_lik(main_analysis_d4_sym_sens$stan_sample))$estimates[3,1]
+waic(extract_log_lik(main_analysis_d5_sym_sens$stan_sample))$estimates[3,1]
+
+```
+
+## plot figure 3a (raw figure) in the manuscript, 
+```{r main-figure, include=F}
+"stan bayesian logistic model, degree of 3, shenzhen data only"
+fnr_fig <- ggplot(data=main_analysis$plot_dat, aes(x=days_since_exposure-9)) +
+    geom_vline(aes(xintercept=0), linetype="dashed", color="grey30") +
+    geom_errorbar(aes(ymin=fnr_lb, ymax=fnr_ub), color="grey40", width=0.35, alpha=0.6) +
+    geom_point(aes(y=fnr_med), color="grey40", alpha=0.6) +
+    scale_x_continuous("Days since symptom onset",
+                       breaks=seq(-8, 7, 1),
+                       labels=c("",-7,"","","","","","",0,
+                                "","","","","","",7),
+                       limits=c(-8.5,7.5),
+                       minor_breaks = seq(-7,7,7)
+                       ) +
+    scale_y_continuous("Probability RT-PCR negative,\ngiven covid-19 positive",
+                       breaks=c(0,0.25,0.5,0.75,1),
+                       labels=c(0,0.25,0.5,0.75,1),
+                       limits=c(-0.6,1.6),
+                       minor_breaks = seq(0,1,0.125)) +
+    theme_bw() +
+    theme(axis.text.y=element_text(color="black")) +
+    geom_hline(aes(yintercept=0)) +
+    geom_hline(aes(yintercept=1)) 
+
+"dot plots of PCR positive results"
+fnr_fig_bottom <- all_infected %>%
+  filter(!is.na(onset_date)) %>%
+  dplyr::select(t_sym,PCR_result)%>%
+  filter(PCR_result == 1) %>%
+  arrange(t_sym) %>%
+  group_by(t_sym) %>%
+  mutate(rownum = row_number()) %>%
+  ggplot(aes(x=t_sym, y=rownum)) + 
+  geom_point(shape=1) + 
+  scale_x_continuous("", breaks=seq(-7, 7, 7),limits=c(-8.5,7.5)) +
+  scale_y_continuous("no.PCR(+)\n", breaks=seq(0,15,5), labels=seq(0,15,5), limits=c(0,15), 
+                     position = "right") +
+  theme_bw() +
+  theme(axis.title.x=element_blank(), panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(),
+        axis.ticks.x=element_blank(),
+        axis.text.x=element_blank(), panel.border = element_blank())
+
+"dot plots of PCR negative results"
+fnr_fig_top <- all_infected %>%
+  filter(!is.na(onset_date)) %>%
+  dplyr::select(t_sym,PCR_result)%>%
+  filter(PCR_result == 0) %>%
+  arrange(t_sym) %>%
+  group_by(t_sym) %>%
+  mutate(rownum = row_number()) %>%
+  ggplot(aes(x=t_sym, y=-rownum)) + 
+  geom_point(shape=1) + 
+  scale_x_continuous("", breaks=seq(-7, 7, 7),limits=c(-8.5,7.5)) +
+  scale_y_continuous("no.PCR(-)\n", breaks=seq(0, -15, -5), labels=seq(0,15,5), limits=c(-15,0), position = "right") +
+  theme_bw() +
+  theme(axis.title.x=element_blank(), panel.grid.major = element_blank(), panel.grid.minor = element_blank(),
+        #axis.title.y=element_blank(),  #axis.text.y=element_blank(),
+        #axis.ticks.y=element_blank(), 
+        axis.ticks.x=element_blank(),
+        axis.text.x=element_blank(), panel.border = element_blank())  
+
+"stan bayesian logistic model, time from last day of exposure...d3"
+fnr_fig_exp <- ggplot(data=main_analysis_exp$plot_dat, aes(x=days_since_exposure-2)) +
+    geom_vline(aes(xintercept=5), linetype="dashed", color="grey30") +
+    geom_errorbar(aes(ymin=fnr_lb, ymax=fnr_ub), color="grey40", width=0.35, alpha=0.6) +
+    geom_point(aes(y=fnr_med), color="grey40", alpha=0.8, alpha=0.6) +
+    scale_x_continuous("Days since last exposure",
+                      breaks=seq(0, 14, 1),
+                      labels=c(0,"","","","","","",
+                                 7,"","","","","","",14),
+                      limits=c(-1.5,14.5),
+                      minor_breaks = seq(0,14,1)
+                      ) +
+    scale_y_continuous("Probability RT-PCR negative,\ngiven covid-19 positive",
+                       breaks=c(0,0.25,0.5,0.75,1),
+                       labels=c(0,0.25,0.5,0.75,1),
+                       #limits=c(-0.3,1.3),
+                       minor_breaks = seq(0,1,0.125),
+                       limits=c(-0.6,1.6)) +
+    theme_bw() +
+    theme(axis.text.y=element_text(color="black")) +
+      geom_hline(aes(yintercept=0)) +
+    geom_hline(aes(yintercept=1)) 
+
+
+"dot plots of PCR positive results..from time since exposure"
+fnr_fig_bottom_exp <- all_infected %>%
+  filter(!is.na(t_exp)) %>%
+  dplyr::select(t_exp,PCR_result)%>%
+  filter(PCR_result == 1) %>%
+  arrange(t_exp) %>%
+  group_by(t_exp) %>%
+  mutate(rownum = row_number()) %>%
+  ggplot(aes(x=t_exp, y=rownum)) + 
+  geom_point(shape=1) + 
+  scale_x_continuous("", breaks=seq(-7, 7, 7),limits=c(-1.5,14.5)) +
+  scale_y_continuous("no.PCR(+)\n", breaks=seq(0,15,5), labels=seq(0,15,5), limits=c(0,15), position = "right") +
+  theme_bw() +
+  theme(axis.title.x=element_blank(), panel.grid.major = element_blank(), panel.grid.minor = element_blank(),
+        #axis.title.y=element_blank(),  
+        #axis.text.y=element_blank(),
+        #axis.ticks.y=element_blank(), 
+        axis.ticks.x=element_blank(),
+        axis.text.x=element_blank(), panel.border = element_blank()) 
+
+"dot plots of PCR negative results..from time since exposure"
+fnr_fig_top_exp <- all_infected %>%
+  filter(!is.na(t_exp)) %>%
+  dplyr::select(t_exp,PCR_result)%>%
+  filter(PCR_result == 0) %>%
+  arrange(t_exp) %>%
+  group_by(t_exp) %>%
+  mutate(rownum = row_number()) %>%
+  ggplot(aes(x=t_exp, y=-rownum)) + 
+  geom_point(shape=1) + 
+  scale_x_continuous("", breaks=seq(-7, 7, 7),limits=c(-1.5,14.5)) +
+  scale_y_continuous("no.PCR(-)\n", breaks=seq(0, -15, -5), labels = seq(0, 15, 5), limits=c(-16,0),position = "right") +
+  theme_bw() +
+  theme(axis.title.x=element_blank(), panel.grid.major = element_blank(), panel.grid.minor = element_blank(),
+        axis.ticks.x=element_blank(),
+        axis.text.x=element_blank(), 
+        panel.border = element_blank()) 
+
+
+"degree of 3, bayesian logistic, shenzhen data only +  GAM of combined + GAM of shenzhen only" 
+fnr_fig +
+  geom_line(data=dat_gam_figure, aes(t, fnr), color="grey40", lwd=1) +
+  geom_line(data=dat_gam_combined_figure_ma, aes(t, fnr_combined), color="grey40", lty=2) -> fig3a
+
+"degree of 3, bayesign logistic,  shenzhen data only + GAM of shenzhen data"
+fnr_fig_exp +
+  geom_line(data=dat_gam_exp_figure %>% filter(t<=14), aes(t, fnr), color="grey40", lwd=1)-> fig3b
+
+ggarrange(ggarrange(fnr_fig_top, fig3a, fnr_fig_bottom, nrow=3, align="v", heights = c(1.1,4,1.1)),
+         ggarrange(fnr_fig_top_exp, fig3b, fnr_fig_bottom_exp, nrow=3, align="v", heights = c(1.1,4,1.1)),
+         ncol=2) #12,6
+  
+```
+## supplemental figure showing hetereogeneity by study in Kucirka et al.
+```{r}
+
+"GAM of combined no random effect (dotted), marginal from GAM of combined with random effect (dashed),
+and individual prediction from GAM of combined with random effect (colored))" 
+fnr_fig +
+  geom_line(data=dat_gam_combined_figure, aes(t, fnr_combined), color="grey40", lty=3)+
+  geom_line(data=dat_gam_combined_figure_ma, aes(t, fnr_combined), color="grey40", lty=2) +
+  geom_line(data=dat_gam_combined_figure_re %>% mutate(study=rep(1:9,each=23)), aes(t, fnr_combined, color="blue",group=study),alpha=0.3, show.legend = FALSE) -> fig_app
+
+ggarrange(fnr_fig_top, fig_app, fnr_fig_bottom, nrow=3, heights = c(1.1,4,1.1)) # 6,6
+```
+
