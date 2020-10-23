@@ -23,12 +23,12 @@ T_max_exp <- 16 # fit the models to 16 days from last day of exposure
 T_max0 <- 16
 # load utility code
 source("source/utils.R")
-# load data from all infected individuals, either PCR confirmed (75) or sero+ (40)
+# load data including all infected individuals, either PCR confirmed (75) or sero+ (40)
 PCR_case_data <- read.csv("data/PCR_case_data.csv")
 ```
 ## input to stan model
 ```{r prep-data}
-## prep data for sensitivity by time since onset analysis
+## prep data for estimating sensitivity by time since onset
 # this helps identify the first positive results from the pcr confirmed cases 
 PCR_case_data %>% filter(serosurvey == "no") %>%
   drop_na(PCR_date) %>%
@@ -43,7 +43,7 @@ PCR_case_data %>% filter(serosurvey == "no") %>%
 
 ## For the main analysis, sensitivity by time from ssymptom onset 
 ## get data from all infected individuals, either PCR+ or sero+
-# du helps identify tests from the same person, done on the same date, and show the same results.
+# du helps identify tests from the same person, done on the same date, and with the same results.
 du <-  duplicated(PCR_case_data[c("PCR_result","PA_index","PCR_date")]) 
 
 all_infected <- PCR_case_data %>% 
@@ -87,8 +87,8 @@ poly_predict_d5 <- predict(day_poly_d5, 1:(T_max_sym))
 
 
 
-## Main analysis, sensitivity by time from last day of exposure to an index
-## get data from all infected individuals, either PCR+ or sero+
+## Main analysis, prep data for estimating sensitivity by time from last day of exposure to an index
+## get data from all infected individuals, either PCR+ or sero+, who have time from exposure information
 all_infected %>%
   filter(!is.na(t_exp)) %>%
   group_by(t_exp) %>%
@@ -120,8 +120,8 @@ poly_predict_exp_d5 <- predict(day_poly_exp_d5, 1:(T_max_exp))
 
 
 
-## For snsitivity analysis looking at hetereogeneity by study pulled in Kucirka et al.,
-# Combine data from Kucirka et al, and shenzhen data
+## For sensitivity analysis looking at hetereogeneity by study pulled in Kucirka et al.,
+# Combine data from Kucirka et al. and shenzhen data
 all_infected %>% filter(!is.na(t_sym)) %>% 
   group_by(t_sym) %>% tally() %>% 
   left_join(
@@ -133,30 +133,12 @@ all_infected %>% filter(!is.na(t_sym)) %>%
   rename(day = t_sym) %>%
   mutate(study = "Bi", test = "RT_PCR", nqp=0, pcr_pos=test_pos/n) -> raw_data_Bi
 
-# all_infected_up2firstpos %>% filter(!is.na(t_sym)) %>% 
-#   group_by(t_sym) %>% tally() %>% 
-#   left_join(
-#     all_infected_up2firstpos %>% filter(PCR_result==1) %>% 
-#       group_by(t_sym) %>% tally() %>% 
-#       rename(test_pos= n), by = "t_sym"
-#   ) %>%
-#   replace_na(list(test_pos = 0)) %>% 
-#   rename(day = t_sym) %>%
-#   mutate(study = "Bi", test = "RT_PCR", nqp=0, pcr_pos=test_pos/n) -> raw_data_Bi_sens
-
 raw_data <- read_csv("./data/rawdata_addShenzhen.csv") %>% 
     filter(grepl("RT_PCR", test),
            study != "Danis_no_4"#, study != "Bi"
     ) %>% bind_rows(
       raw_data_Bi
     )
-
-# raw_data_sens <- read_csv("./data/rawdata_addShenzhen.csv") %>% 
-#     filter(grepl("RT_PCR", test),
-#            study != "Danis_no_4"#, study != "Bi"
-#     ) %>% bind_rows(
-#       raw_data_Bi_sens
-#     )
 
 pcr_dat0 <- raw_data %>%
     ## add non-quantified positives to other positives for Danis et al.
@@ -182,8 +164,8 @@ poly_predict0_d5 <- predict(day_poly0_d5, 1:T_max0)
 
 
 
-## For sensitivity analysis, get data from all seropositive individuals
-## PLUS data up to 1st pcr pos test from the PCR confirmed cases
+## For sensitivity analysis, using data up to 1st pcr positive tests from PCR-confirmed cases
+# get data from all seropositive individuals PLUS data up to 1st pcr pos test from the PCR confirmed cases
 all_infected_up2firstpos <- PCR_case_data %>% 
   left_join(tmp_first_pos, by="PA_index") %>% 
   mutate(du=du) %>% mutate(nn=row_number())%>%
@@ -194,8 +176,8 @@ all_infected_up2firstpos <- PCR_case_data %>%
       filter(quarantine_enddate >= PCR_date)
   ) %>%
   drop_na(PCR_date)
-
-## sensitivity analysis deleting the test results after the first pos from PCR-confirmed cases
+  
+# and turn it into the format that shows #PCR tests, #PCR positive tests on each day from sympton onset
 all_infected_up2firstpos %>%
   filter(!is.na(onset_date)) %>%
   group_by(t_sym) %>%
@@ -328,7 +310,7 @@ main_analysis_exp_d5 <- make_analysis_data(stan_model=npv_onset_model_d5,
 
 ## run sensitivity analysis, PCR test sensitivity vs. time from onset
 ## model performance shown in 4th column in appendix table 3
-## we truncate data from PCR-confirmed cases up to their first positive result
+## we truncate tests after the first positive result
 main_analysis_sym_sens <- make_analysis_data(stan_model=npv_onset_model,
                                     dat=pcr_dat_sym_sens,
                                     T_max=T_max_sym,
