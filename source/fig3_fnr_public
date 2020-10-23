@@ -133,7 +133,7 @@ all_infected %>% filter(!is.na(t_sym)) %>%
   rename(day = t_sym) %>%
   mutate(study = "Bi", test = "RT_PCR", nqp=0, pcr_pos=test_pos/n) -> raw_data_Bi
 
-raw_data <- read_csv("./data/rawdata_addShenzhen.csv") %>% 
+raw_data <- read_csv("./data/data_Kucirka.csv") %>% 
     filter(grepl("RT_PCR", test),
            study != "Danis_no_4"#, study != "Bi"
     ) %>% bind_rows(
