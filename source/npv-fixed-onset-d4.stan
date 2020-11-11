@@ -7,14 +7,11 @@
 
 data {
     int<lower=1> N;
-    //int<lower=1> J; // number of studies
     int<lower=1> T_max;
     int<lower=1> test_n[N];
     int<lower=0> test_pos[N];
     matrix[N,4] t_ort;
     matrix[T_max, 4] t_new_ort;
-    //int<lower=1> study_idx[N];
-    //real spec;
 }
 
 // the beta terms are the coefficients for the df4 polynomial for time.
@@ -28,9 +25,6 @@ parameters{
 
 transformed parameters{
     vector[N] mu;
-    //vector[J] beta_j;
-
-    //beta_j = beta_0 + sigma*eta;
 
     for(i in 1:N){
         mu[i] = beta_0+beta_1*t_ort[i,1]+beta_2*t_ort[i,2]+beta_3*t_ort[i,3]+beta_4*t_ort[i,4]; // beta_j[study_idx[i]]+
@@ -39,7 +33,6 @@ transformed parameters{
 
 model {
     target += binomial_logit_lpmf(test_pos | test_n, mu);
-    //target += normal_lpdf(eta | 0, 1);
 }
 
 // 'sens' is the sensitivity of the RT-PCR over time for the predicted values.
