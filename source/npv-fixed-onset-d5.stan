@@ -7,17 +7,14 @@
 
 data {
     int<lower=1> N;
-    //int<lower=1> J; // number of studies
     int<lower=1> T_max;
     int<lower=1> test_n[N];
     int<lower=0> test_pos[N];
     matrix[N,5] t_ort;
     matrix[T_max, 5] t_new_ort;
-    //int<lower=1> study_idx[N];
-    //real spec;
 }
 
-// the beta terms are the coefficients for the cubic polynomial for log-time.
+// the beta terms are the coefficients for the df=5 polynomial for log-time.
 parameters{
     real beta_0;
     real beta_1;
@@ -25,19 +22,13 @@ parameters{
     real beta_3;
     real beta_4;
     real beta_5;
-    //real<lower=0> sigma;
-    //vector[J] eta;
-    //real<lower=0, upper=1> attack_rate;
 }
 
 transformed parameters{
     vector[N] mu;
-    //vector[J] beta_j;
-
-    //beta_j = beta_0 + sigma*eta;
 
     for(i in 1:N){
-        mu[i] = beta_0+beta_1*t_ort[i,1]+beta_2*t_ort[i,2]+beta_3*t_ort[i,3]+beta_4*t_ort[i,4]+beta_5*t_ort[i,5]; // beta_j[study_idx[i]]+
+        mu[i] = beta_0+beta_1*t_ort[i,1]+beta_2*t_ort[i,2]+beta_3*t_ort[i,3]+beta_4*t_ort[i,4]+beta_5*t_ort[i,5]; 
     }
 }
 
